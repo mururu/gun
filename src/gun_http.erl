@@ -23,6 +23,8 @@
 -export([data/4]).
 -export([cancel/2]).
 
+-export([ws_upgrade/4]).
+
 -type opts() :: [{version, cow_http:version()}].
 -export_type([opts/0]).
 
@@ -334,3 +336,23 @@ cancel_stream(State=#http_state{streams=Streams}, StreamRef) ->
 
 end_stream(State=#http_state{streams=[_|Tail]}) ->
 	State#http_state{in=head, streams=Tail}.
+
+%% WebSocket Upgrade
+
+%% 難しいのでとりあえず connect 直後に upgrade を行う前提で進める
+
+ws_upgrade(State=#http_state{owner=Owner, socket=Socket, transport=Transport},
+           Host, Path, Headers) ->
+  WsKey = generate_ws_key(),
+  %% TODO: Host はうまいこと補完される？（要チェック）
+  %% TODO: Origin は強制付与しなくてもよい？
+  Headers2 = [{<<"Upgrade">>, <<"websocket">>},
+             {<<"Connection">>, <<"Upgrade">>},
+             {<<"Sec-WebSocket-Key">>, WsKey},
+             {<<"Sec-WebSocket-Version">>, <<"13">>}] ++ Headers,
+  StreamRef = make_ref(),
+  request(State, StreamRef, <<"GET">>, Host, Path, Headers2),
+  gun_ws:init(Owner, Socket, Transport, WsKey).
+
+generate_ws_key() ->
+    base64:encode(crypto:rand_bytes(16)).

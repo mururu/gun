@@ -509,8 +509,7 @@ loop(State=#state{parent=Parent, owner=Owner, host=Host,
 			loop(State#state{protocol_state=ProtoState2});
 		{ws_upgrade, Owner, Path, Headers} when Protocol =/= gun_spdy ->
 			%% @todo
-			ProtoState2 = Protocol:ws_upgrade(ProtoState,
-				Path, Headers),
+			ProtoState2 = Protocol:ws_upgrade(ProtoState, Host, Path, Headers),
 			ws_loop(State#state{protocol=gun_ws, protocol_state=ProtoState2});
 		{shutdown, Owner} ->
 			%% @todo Protocol:shutdown?
@@ -545,7 +544,7 @@ ws_loop(State=#state{parent=Parent, owner=Owner, retry=Retry, socket=Socket,
 	ok = Transport:setopts(Socket, [{active, once}]),
 	receive
 		{OK, Socket, Data} ->
-			ProtoState2 = Protocol:handle(ProtoState, Data),
+			ProtoState2 = Protocol:handle(Data, ProtoState),
 			ws_loop(State#state{protocol_state=ProtoState2});
 		{Closed, Socket} ->
 			Transport:close(Socket),
