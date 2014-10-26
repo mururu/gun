@@ -4,7 +4,7 @@ PROJECT = gun
 
 # Options.
 
-CT_SUITES = twitter
+CT_SUITES = twitter ws
 PLT_APPS = ssl
 
 # Dependencies.
