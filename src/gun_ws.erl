@@ -16,6 +16,8 @@
 
 -export([init/4]).
 -export([handle/2]).
+-export([send/2]).
+-export([send_many/2]).
 
 -record(ws_state, {
 	owner :: pid(),
@@ -23,7 +25,11 @@
 	transport :: module(),
 	buffer = <<>> :: binary(),
   ws_key :: binary(),
-  in_state = connecting :: connecting | open
+  in_state = connecting :: connecting | open,
+  %% TODO: deflate まわりの実装
+	deflate_frame = false :: boolean(),
+	inflate_state :: undefined | port(),
+	deflate_state :: undefined | port()
 }).
 
 init(Owner, Socket, Transport, WsKey) ->
@@ -44,13 +50,14 @@ handle(Data, State=#ws_state{in_state=connecting, owner=Owner, buffer=Buffer}) -
           Owner ! {gun_ws_upgrade, self(), ok},
           State2;
         E ->
+          ct:pal(Data2),
           ct:pal("~p~n", [E]),
           error(fail_validate)
       end
 	end;
 %% handle WebSocket
 handle(#ws_state{in_state = open}, Data) ->
-  ct:pal("connected!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!~n").
+  ct:pal("Data: ~p~n",[Data]).
 
 validate_handshake(Data, State=#ws_state{ws_key=WsKey}) ->
   Challenge = base64:encode(crypto:hash(sha, <<WsKey/binary, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11">>)),
@@ -82,6 +89,88 @@ validate_handshake(Data, State=#ws_state{ws_key=WsKey}) ->
           error(fail_upgrade)
       end;
     E ->
+      ct:pal("~p~n", [Data]),
       ct:pal("~p~n", [E]),
       error(fail_status)
   end.
+
+%% -spec send(frame(), #ws_state{})
+%% -> {ok, #ws_state{}} | {shutdown, #ws_state{}} | {{error, atom()}, #ws_state{}}.
+send(Type, State=#ws_state{socket=Socket, transport=Transport})
+		when Type =:= close ->
+	Opcode = websocket_opcode(Type),
+	case Transport:send(Socket, << 1:1, 0:3, Opcode:4, 0:8 >>) of
+		ok -> {shutdown, State};
+		Error -> {Error, State}
+	end;
+send(Type, State=#ws_state{socket=Socket, transport=Transport})
+		when Type =:= ping; Type =:= pong ->
+	Opcode = websocket_opcode(Type),
+	{Transport:send(Socket, << 1:1, 0:3, Opcode:4, 0:8 >>), State};
+send({close, Payload}, State) ->
+	send({close, 1000, Payload}, State);
+send({Type = close, StatusCode, Payload}, State=#ws_state{
+		socket=Socket, transport=Transport}) ->
+	Opcode = websocket_opcode(Type),
+	Len = 2 + iolist_size(Payload),
+	%% Control packets must not be > 125 in length.
+	true = Len =< 125,
+	BinLen = payload_length_to_binary(Len),
+	Transport:send(Socket,
+		[<< 1:1, 0:3, Opcode:4, 0:1, BinLen/bits, StatusCode:16 >>, Payload]),
+	{shutdown, State};
+send({Type, Payload0}, State=#ws_state{socket=Socket, transport=Transport}) ->
+	Opcode = websocket_opcode(Type),
+	{Payload, Rsv, State2} = websocket_deflate_frame(Opcode, iolist_to_binary(Payload0), State),
+	Len = iolist_size(Payload),
+	%% Control packets must not be > 125 in length.
+	true = if Type =:= ping; Type =:= pong ->
+			Len =< 125;
+		true ->
+			true
+	end,
+	BinLen = payload_length_to_binary(Len),
+  ct:pal("s: ~p",[iolist_to_binary([<< 1:1, Rsv/bits, Opcode:4, 0:1, BinLen/bits >>, Payload])]),
+	{Transport:send(Socket,
+		[<< 1:1, Rsv/bits, Opcode:4, 0:1, BinLen/bits >>, Payload]), State2}.
+
+%% -spec websocket_send_many([frame()], #ws_state{})
+%%   -> {ok, #ws_state{}} | {shutdown, #ws_state{}} | {{error, atom()}, #ws_state{}}.
+send_many([], State) ->
+	{ok, State};
+send_many([Frame|Tail], State) ->
+	case send(Frame, State) of
+		{ok, State2} -> send_many(Tail, State2);
+		{shutdown, State2} -> {shutdown, State2};
+		{Error, State2} -> {Error, State2}
+	end.
+
+websocket_opcode(text) -> 1;
+websocket_opcode(binary) -> 2;
+websocket_opcode(close) -> 8;
+websocket_opcode(ping) -> 9;
+websocket_opcode(pong) -> 10.
+
+%% -spec websocket_deflate_frame(opcode(), binary(), #state{}) ->
+%%   {binary(), rsv(), #state{}}.
+websocket_deflate_frame(Opcode, Payload,
+		State=#ws_state{deflate_frame = DeflateFrame})
+		when DeflateFrame =:= false orelse Opcode >= 8 ->
+	{Payload, << 0:3 >>, State};
+websocket_deflate_frame(_, Payload, State=#ws_state{deflate_state = Deflate}) ->
+	Deflated = iolist_to_binary(zlib:deflate(Deflate, Payload, sync)),
+	DeflatedBodyLength = erlang:size(Deflated) - 4,
+	Deflated1 = case Deflated of
+		<< Body:DeflatedBodyLength/binary, 0:8, 0:8, 255:8, 255:8 >> -> Body;
+		_ -> Deflated
+	end,
+	{Deflated1, << 1:1, 0:2 >>, State}.
+
+-spec payload_length_to_binary(0..16#7fffffffffffffff)
+	-> << _:7 >> | << _:23 >> | << _:71 >>.
+payload_length_to_binary(N) ->
+	case N of
+		N when N =< 125 -> << N:7 >>;
+		N when N =< 16#ffff -> << 126:7, N:16 >>;
+		N when N =< 16#7fffffffffffffff -> << 127:7, N:64 >>
+	end.

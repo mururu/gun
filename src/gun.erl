@@ -556,9 +556,13 @@ ws_loop(State=#state{parent=Parent, owner=Owner, retry=Retry, socket=Socket,
 				protocol=undefined}, Retry);
 		%% @todo keepalive
 		{ws_send, Owner, Frames} when is_list(Frames) ->
-			todo; %% @todo
+      %% TODO: ここのエラー処理
+      {ok, ProtoState2} = Protocol:send_many(Frames, ProtoState),
+      ws_loop(State#state{protocol_state=ProtoState2});
 		{ws_send, Owner, Frame} ->
-			{todo, Frame}; %% @todo
+      {ok, ProtoState2} = Protocol:send(Frame, ProtoState),
+      ct:pal("sended"),
+      ws_loop(State#state{protocol_state = ProtoState2});
 		{shutdown, Owner} ->
 			%% @todo Protocol:shutdown?
 			ok;
