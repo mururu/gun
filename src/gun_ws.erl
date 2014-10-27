@@ -98,31 +98,38 @@ validate_handshake(Data, State=#ws_state{ws_key=WsKey}) ->
 %% -> {ok, #ws_state{}} | {shutdown, #ws_state{}} | {{error, atom()}, #ws_state{}}.
 send(Type, State=#ws_state{socket=Socket, transport=Transport})
 		when Type =:= close ->
+  MaskingKey = crypto:rand_bytes(4),
 	Opcode = websocket_opcode(Type),
-	case Transport:send(Socket, << 1:1, 0:3, Opcode:4, 0:8 >>) of
+  case Transport:send(Socket, << 1:1, 0:3, Opcode:4, 1:1, 0:7, MaskingKey/binary >>) of
 		ok -> {shutdown, State};
 		Error -> {Error, State}
 	end;
 send(Type, State=#ws_state{socket=Socket, transport=Transport})
 		when Type =:= ping; Type =:= pong ->
+  MaskingKey = crypto:rand_bytes(4),
 	Opcode = websocket_opcode(Type),
-	{Transport:send(Socket, << 1:1, 0:3, Opcode:4, 0:8 >>), State};
+  MaskingKey = crypto:rand_bytes(4),
+	{Transport:send(Socket, << 1:1, 0:3, Opcode:4, 1:1, 0:7, MaskingKey/binary >>), State};
 send({close, Payload}, State) ->
 	send({close, 1000, Payload}, State);
 send({Type = close, StatusCode, Payload}, State=#ws_state{
 		socket=Socket, transport=Transport}) ->
+  MaskingKey = crypto:rand_bytes(4),
 	Opcode = websocket_opcode(Type),
-	Len = 2 + iolist_size(Payload),
+  Payload2 = mask_payload(MaskingKey, Payload),
+	Len = 2 + iolist_size(Payload2),
 	%% Control packets must not be > 125 in length.
 	true = Len =< 125,
 	BinLen = payload_length_to_binary(Len),
 	Transport:send(Socket,
-		[<< 1:1, 0:3, Opcode:4, 0:1, BinLen/bits, StatusCode:16 >>, Payload]),
+		[<< 1:1, 0:3, Opcode:4, 1:1, BinLen/bits, MaskingKey/binary, StatusCode:16 >>, Payload2]),
 	{shutdown, State};
 send({Type, Payload0}, State=#ws_state{socket=Socket, transport=Transport}) ->
+  MaskingKey = crypto:rand_bytes(4),
 	Opcode = websocket_opcode(Type),
 	{Payload, Rsv, State2} = websocket_deflate_frame(Opcode, iolist_to_binary(Payload0), State),
-	Len = iolist_size(Payload),
+  Payload2 = mask_payload(MaskingKey, Payload),
+	Len = iolist_size(Payload2),
 	%% Control packets must not be > 125 in length.
 	true = if Type =:= ping; Type =:= pong ->
 			Len =< 125;
@@ -130,9 +137,8 @@ send({Type, Payload0}, State=#ws_state{socket=Socket, transport=Transport}) ->
 			true
 	end,
 	BinLen = payload_length_to_binary(Len),
-  ct:pal("s: ~p",[iolist_to_binary([<< 1:1, Rsv/bits, Opcode:4, 0:1, BinLen/bits >>, Payload])]),
 	{Transport:send(Socket,
-		[<< 1:1, Rsv/bits, Opcode:4, 0:1, BinLen/bits >>, Payload]), State2}.
+		[<< 1:1, Rsv/bits, Opcode:4, 1:1, BinLen/bits, MaskingKey/binary >>, Payload2]), State2}.
 
 %% -spec websocket_send_many([frame()], #ws_state{})
 %%   -> {ok, #ws_state{}} | {shutdown, #ws_state{}} | {{error, atom()}, #ws_state{}}.
@@ -165,6 +171,27 @@ websocket_deflate_frame(_, Payload, State=#ws_state{deflate_state = Deflate}) ->
 		_ -> Deflated
 	end,
 	{Deflated1, << 1:1, 0:2 >>, State}.
+
+mask_payload(MaskingKeyBin, Payload) ->
+  << MaskingKey:32 >> = MaskingKeyBin,
+  mask_payload(MaskingKey, Payload, <<>>).
+mask_payload(_, <<>>, Acc) ->
+  Acc;
+mask_payload(MaskingKey, << D:32, Rest/bits >>, Acc) ->
+  T = D bxor MaskingKey,
+  mask_payload(MaskingKey, Rest, << Acc/binary, T:32 >>);
+mask_payload(MaskingKey, << D:24 >>, Acc) ->
+  << MaskingKeyPart:24, _:8 >> = << MaskingKey:32 >>,
+  T = D bxor MaskingKeyPart,
+  << Acc/binary, T:24 >>;
+mask_payload(MaskingKey, << D:16 >>, Acc) ->
+  << MaskingKeyPart:16, _:16 >> = << MaskingKey:32 >>,
+  T = D bxor MaskingKeyPart,
+  << Acc/binary, T:16 >>;
+mask_payload(MaskingKey, << D:8 >>, Acc) ->
+  << MaskingKeyPart:8, _:24 >> = << MaskingKey:32 >>,
+  T = D bxor MaskingKeyPart,
+  << Acc/binary, T:8 >>.
 
 -spec payload_length_to_binary(0..16#7fffffffffffffff)
 	-> << _:7 >> | << _:23 >> | << _:71 >>.
