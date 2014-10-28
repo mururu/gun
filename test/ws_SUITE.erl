@@ -61,9 +61,9 @@ echo_websocket_org(_) ->
       error(ws_upgarade_timeout)
   end,
 
-  ok = gun:ws_send(Pid, {text, "Hello!"}),
+  ok = gun:ws_send(Pid, {text, <<"Hello!">>}),
   receive
-    {gun_ws, Pid, {text, "Hello"}} ->
+    {gun_ws, Pid, {text, <<"Hello!">>}} ->
       ok;
     {gun_ws, Pid, Frame} ->
       error({receive_unknown_frame, Frame});
