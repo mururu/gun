@@ -561,7 +561,6 @@ ws_loop(State=#state{parent=Parent, owner=Owner, retry=Retry, socket=Socket,
       ws_loop(State#state{protocol_state=ProtoState2});
 		{ws_send, Owner, Frame} ->
       {ok, ProtoState2} = Protocol:send(Frame, ProtoState),
-      ct:pal("sended"),
       ws_loop(State#state{protocol_state = ProtoState2});
 		{shutdown, Owner} ->
 			%% @todo Protocol:shutdown?
